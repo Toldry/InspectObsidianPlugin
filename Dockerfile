@@ -12,4 +12,5 @@ RUN mkdir -p /repo && cd /repo && \
     git remote remove origin && \
     git config user.email "agent@example.com" && \
     git config user.name "Agent" && \
-    npm install
+    npm install && \
+    git reset --hard
