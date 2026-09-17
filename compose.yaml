@@ -1,0 +1,11 @@
+services:
+  default:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: tail -f /dev/null
+    init: true
+    cpus: 1.0
+    mem_limit: 2gb
+    network_mode: none
+    stop_grace_period: 1s
