@@ -1,0 +1,28 @@
+{
+    "name": "${localWorkspaceFolderBasename} Safe Sandbox",
+    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+    "remoteUser": "vscode",
+    "containerEnv": {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "${containerWorkspaceFolder}"
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "files.eol": "\n"
+            },
+            "extensions": []
+        }
+    },
+    "runArgs": [
+        "--security-opt=no-new-privileges:true",
+        "--name=dev_container_${localWorkspaceFolderBasename}",
+        "--env-file",
+        "${localEnv:USERPROFILE}/.secrets/InspectObsidianPlugin.env"
+    ],
+    "mounts": [
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind"
+    ]
+}
