@@ -40,14 +40,20 @@ InspectObsidianPlugin/
 │   ├── devcontainer-lock.json # Pinned feature versions/digests (commit it)
 │   ├── Dockerfile            # Root-only setup (sudo is disabled at runtime)
 │   └── managed-settings.json # Claude Code starts in auto mode inside the container only
-├── swe_daylio_popout.py    # Main Inspect task definition & custom test scorer
+├── src/
+│   ├── swe_daylio_popout.py  # Main Inspect task definition & custom test scorer
+│   └── quota_guard.py        # Automatic abort & retry suppression for spending caps
+├── env.patch               # Environment-only changes (test mock stubs) committed on top of upstream as the eval base
 ├── test.patch              # Hidden reference unit tests applied post-agent run
-├── Dockerfile              # Sandbox container definition (shallow-fetched base commit, npm deps)
+├── gold.patch              # Reference fix (never copied into the image); used by scripts/validate_task.py
+├── Dockerfile              # Sandbox container definition (shallow-fetched upstream commit + env.patch, npm deps)
+├── .dockerignore           # Build context is only Dockerfile + env.patch (keeps hidden tests / gold out)
 ├── compose.yaml            # Docker Compose config (network_mode: none for isolation)
 ├── scripts/                # Log inspection & debugging utilities (Python)
 │   ├── inspect_latest_log.py # Summarize, inspect trajectory, scores, and tokens
-│   ├── latest_diff.py        # Dump model-generated git diff (model_patch)
-│   └── latest_tests.py       # View clean test scorer output & failure messages
+│   ├── latest_diff.py        # Dump model-generated git diff (model_patch; -w hides whitespace churn)
+│   ├── latest_tests.py       # View clean test scorer output & failure messages
+│   └── validate_task.py      # Docker-free check: hidden tests fail on base, pass with gold.patch
 ├── logs/                   # Evaluation results stored as .eval logs
 ├── .env                    # Environment credentials (e.g., model API keys)
 ├── .venv/                  # Python virtual environment (contains inspect_ai)
@@ -58,20 +64,24 @@ InspectObsidianPlugin/
 
 ### Component Details
 
-1. **Task Definition ([`swe_daylio_popout.py`](swe_daylio_popout.py))**:
+1. **Task Definition ([`src/swe_daylio_popout.py`](src/swe_daylio_popout.py)) & Quota Guard ([`src/quota_guard.py`](src/quota_guard.py))**:
    - Defines the task using `@task`.
    - Supplies the agent with the issue prompt and base commit metadata.
    - Equips the agent with execution tools (`bash()`, `text_editor()`).
+   - Guards against endless retry loops on spending caps / quota exhaustion by catching terminal errors and marking the evaluation as failed (`status="error"`) with `Score.unscored(reason="scoring_failed")`.
    - Captures model diff against `base_commit` and hooks into the `npm_test_scorer()` to validate changes.
 
 2. **Sandbox Environment ([`Dockerfile`](Dockerfile) & [`compose.yaml`](compose.yaml))**:
    - Runs a containerized Node.js environment (`node:20`).
-   - Shallow-fetches (`git fetch --depth 1`) **only** the target commit SHA (`91887ba8fae8068ff3f02e37c62d565221a8ee48`) to eliminate future commit/tag leakage while preserving exact git blob SHAs.
+   - Shallow-fetches (`git fetch --depth 1`) **only** the upstream commit SHA (`91887ba8fae8068ff3f02e37c62d565221a8ee48`) to eliminate future commit/tag leakage while preserving exact git blob SHAs.
+   - Applies [`env.patch`](env.patch) and commits it with a fixed identity and date, so the evaluation base commit has a deterministic SHA (`BASE_COMMIT`). The build fails if the SHA drifts. If you change `env.patch`, update `BASE_COMMIT` in both the Dockerfile and `src/swe_daylio_popout.py` (run `scripts/validate_task.py` to get the new SHA).
    - Pre-installs all npm dependencies so tests can run offline with `network_mode: none`.
 
 3. **Evaluation Test Suite ([`test.patch`](test.patch))**:
    - Contains unit tests that specifically assert the expected behavior for the issue.
-   - Prior to scoring, any changes made by the agent to `tests/` are reverted to `base_commit` to prevent tampering, and `test.patch` is applied cleanly using `git apply --whitespace=nowarn`.
+   - Prior to scoring, `tests/` is deleted and restored from `base_commit` (together with `vitest.config.ts`) to prevent tampering, and `test.patch` is applied cleanly using `git apply --whitespace=nowarn`. Vitest is then run directly (`node_modules/.bin/vitest run`), not via the `package.json` script.
+   - Tests check *behavior* (where the note ends up, via a window-aware fake workspace), not which Obsidian API the fix calls, so any correct fix can pass.
+   - After changing `test.patch`, `env.patch` or `gold.patch`, run `python scripts/validate_task.py`: the hidden tests must fail on the base and pass with `gold.patch`. Add `--log logs/<file>.eval` to replay a model's patch. This runs locally with Node.js (no Docker).
    - Never exposed directly to the model during solver execution.
 
 ---
@@ -85,10 +95,10 @@ InspectObsidianPlugin/
 To run an evaluation task (user, on the host):
 ```bash
 # Run a single sample test
-inspect eval swe_daylio_popout.py --model google/gemini-3.6-flash --limit 1
+inspect eval src/swe_daylio_popout.py --model google/gemini-3.6-flash --limit 1
 
 # Run with custom limits or log directory
-inspect eval swe_daylio_popout.py --model <model-name> --limit 1 --log-dir ./logs
+inspect eval src/swe_daylio_popout.py --model <model-name> --limit 1 --log-dir ./logs
 ```
 
 ### Viewing and Analyzing Logs
@@ -113,6 +123,7 @@ Inspect provides visual tools, CLI commands, and dedicated workspace scripts in 
 
    # View the git diff (model_patch) produced by the agent:
    python scripts/latest_diff.py
+   # (Add --ignore-whitespace / -w to hide tab-to-space churn from the text_editor tool)
 
    # List recent evaluation logs:
    python scripts/inspect_latest_log.py --list
@@ -177,7 +188,7 @@ Inspect provides visual tools, CLI commands, and dedicated workspace scripts in 
 6. **Re-Scoring Existing Logs (`inspect score`)** — *host only, ask the user*:
    Re-run a scorer over an existing eval log without re-executing the model (the scorer runs tests in a Docker sandbox, so this needs Docker):
    ```bash
-   inspect score logs/<log-file>.eval --scorer swe_daylio_popout.py@npm_test_scorer
+   inspect score logs/<log-file>.eval --scorer src/swe_daylio_popout.py@npm_test_scorer
    ```
 
 7. **Recovering Incomplete/Crashed Logs (`inspect log recover`)**:

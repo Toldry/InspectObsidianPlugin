@@ -1,65 +1,5 @@
-diff --git a/tests/__mocks__/obsidian.ts b/tests/__mocks__/obsidian.ts
-index ea61b53..9d25382 100644
---- a/tests/__mocks__/obsidian.ts
-+++ b/tests/__mocks__/obsidian.ts
-@@ -12,13 +12,41 @@
- 
- export class WorkspaceLeaf {
- 	view: unknown;
-+	openFile(_file: TFile, _openState?: unknown): Promise<void> {
-+		return Promise.resolve();
-+	}
- }
- 
- export class Workspace {
- 	leaves: WorkspaceLeaf[] = [];
-+	rootSplit: unknown = {};
- 	getLeavesOfType(_type: string): WorkspaceLeaf[] {
- 		return this.leaves;
- 	}
-+	iterateAllLeaves(callback: (leaf: WorkspaceLeaf) => unknown): void {
-+		for (const leaf of this.leaves) {
-+			callback(leaf);
-+		}
-+	}
-+	getLeaf(_newLeaf?: unknown, _direction?: unknown): WorkspaceLeaf {
-+		return new WorkspaceLeaf();
-+	}
-+	getMostRecentLeaf(_root?: unknown): WorkspaceLeaf | null {
-+		return null;
-+	}
-+	createLeafBySplit(_leaf: WorkspaceLeaf, _direction?: unknown): WorkspaceLeaf {
-+		return new WorkspaceLeaf();
-+	}
-+	setActiveLeaf(_leaf: WorkspaceLeaf, _params?: { focus?: boolean }): void {}
-+	openLinkText(_linktext: string, _sourcePath: string, _newLeaf?: unknown): Promise<void> {
-+		return Promise.resolve();
-+	}
-+}
-+
-+export class Keymap {
-+	static isModEvent(_evt?: unknown): string | boolean {
-+		return false;
-+	}
- }
- 
- export class Vault {
-@@ -36,9 +64,12 @@ export class App {
- }
- 
- export class ItemView {
-+	leaf: WorkspaceLeaf;
- 	app: App = new App();
- 	containerEl: HTMLElement = typeof document !== "undefined" ? document.createElement("div") : ({} as HTMLElement);
--	constructor(_leaf: WorkspaceLeaf) {}
-+	constructor(leaf: WorkspaceLeaf) {
-+		this.leaf = leaf;
-+	}
- 	addAction(_icon: string, _title: string, _callback: () => void): void {}
- 	registerDomEvent(
- 		el: Window | Document | HTMLElement,
 diff --git a/tests/unit/graph-view.test.ts b/tests/unit/graph-view.test.ts
-index 899fc73..c0b351b 100644
+index 1732fa3..7275267 100644
 --- a/tests/unit/graph-view.test.ts
 +++ b/tests/unit/graph-view.test.ts
 @@ -13,7 +13,7 @@ import {
@@ -67,214 +7,369 @@ index 899fc73..c0b351b 100644
  	type HasDaylioSettings,
  } from "../../src/types";
 -import { App, WorkspaceLeaf, TFile } from "obsidian";
-+import { App, WorkspaceLeaf, TFile, Keymap } from "obsidian";
++import { App, Workspace, WorkspaceLeaf, TFile } from "obsidian";
  
  class MockPlugin implements HasDaylioSettings {
  	app = new App();
-@@ -364,7 +364,7 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
+@@ -185,6 +185,15 @@ class MockElement extends MockEventTarget {
+ 		return null;
+ 	}
+ 
++	// Obsidian augments every Node with `doc` and `win` for pop-out support.
++	get doc(): MockDocument | null {
++		return this.ownerDocument;
++	}
++
++	get win(): MockWindow | null {
++		return this.ownerDocument?.defaultView ?? null;
++	}
++
+ 	querySelector(selector: string): MockElement | null {
+ 		const className = selector.replace(/^\./, "");
+ 		if (this.classList.contains(className)) return this;
+@@ -302,6 +311,165 @@ class MockWheelEvent extends MockBaseEvent {
+ 	}
+ }
+ 
++class MockMouseEvent extends MockBaseEvent {
++	button: number;
++	clientX = 0;
++	clientY = 0;
++	ctrlKey: boolean;
++	metaKey: boolean;
++	altKey: boolean;
++	shiftKey: boolean;
++
++	constructor(
++		type: string,
++		options?: { button?: number; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; shiftKey?: boolean },
++	) {
++		super(type, { bubbles: true, cancelable: true });
++		this.button = options?.button ?? 0;
++		this.ctrlKey = !!options?.ctrlKey;
++		this.metaKey = !!options?.metaKey;
++		this.altKey = !!options?.altKey;
++		this.shiftKey = !!options?.shiftKey;
++	}
++}
++
++// ── Window-aware fake of Obsidian's Workspace ───────────────────────────
++//
++// Models just enough of Obsidian's workspace to check *where* a note ends up,
++// regardless of which workspace API an implementation uses to get there.
++// Semantics follow Obsidian:
++// - getLeaf(false) reuses the active leaf if it can navigate (a note or an
++//   empty tab), else the most recently active navigable leaf in the active
++//   leaf's window, else creates a new tab in that window.
++// - getLeaf(true | "tab" | "split") creates a leaf next to the active leaf
++//   (same window). getLeaf("window") creates a leaf in a new pop-out window.
++// - getMostRecentLeaf(root) returns the most recently active leaf under root
++//   (rootSplit, i.e. the main window, by default).
++// - setActiveLeaf(leaf, { focus: true }) and revealLeaf(leaf) activate the
++//   leaf and focus its window.
++
++type FakeRoot = { win: MockWindow; doc: MockDocument };
++type FakeLeafOrigin = "initial" | "tab" | "split" | "window";
++
++function makeFakeView(type: string, doc: MockDocument, file?: TFile) {
++	return { getViewType: () => type, containerEl: new MockElement("div", doc), file: file ?? null };
++}
++
++class FakeLeaf extends WorkspaceLeaf {
++	containerEl: MockElement;
++	pinned = false;
++
++	constructor(
++		readonly workspace: FakeWorkspace,
++		readonly root: FakeRoot,
++		readonly origin: FakeLeafOrigin,
++	) {
++		super();
++		this.containerEl = new MockElement("div", root.doc);
++		this.view = makeFakeView("empty", root.doc);
++	}
++
++	get viewType(): string | undefined {
++		return (this.view as { getViewType?: () => string } | null)?.getViewType?.();
++	}
++
++	get filePath(): string | null {
++		return (this.view as { file?: TFile | null } | null)?.file?.path ?? null;
++	}
++
++	getRoot(): FakeRoot {
++		return this.root;
++	}
++
++	getContainer(): FakeRoot {
++		return this.root;
++	}
++
++	openFile(file: TFile, openState?: { active?: boolean }): Promise<void> {
++		this.view = makeFakeView("markdown", this.root.doc, file);
++		if (openState?.active) this.workspace.setActiveLeaf(this, { focus: true });
++		return Promise.resolve();
++	}
++}
++
++class FakeWorkspace extends Workspace {
++	rootSplit: FakeRoot;
++	leaves: FakeLeaf[] = [];
++	activeLeaf: FakeLeaf | null = null;
++	focusedWindow: MockWindow | null = null;
++	private history: FakeLeaf[] = [];
++
++	constructor(
++		mainWindow: MockWindow,
++		private readonly vault: { getAbstractFileByPath(path: string): unknown },
++	) {
++		super();
++		this.rootSplit = { win: mainWindow, doc: mainWindow.document };
++	}
++
++	addLeaf(root: FakeRoot, origin: FakeLeafOrigin): FakeLeaf {
++		const leaf = new FakeLeaf(this, root, origin);
++		this.leaves.push(leaf);
++		return leaf;
++	}
++
++	private canNavigate(leaf: FakeLeaf): boolean {
++		return !leaf.pinned && (leaf.viewType === "markdown" || leaf.viewType === "empty");
++	}
++
++	getLeavesOfType(type: string): WorkspaceLeaf[] {
++		return this.leaves.filter((l) => l.viewType === type);
++	}
++
++	iterateAllLeaves(callback: (leaf: WorkspaceLeaf) => unknown): void {
++		for (const leaf of [...this.leaves]) callback(leaf);
++	}
++
++	getLeaf(newLeaf?: unknown, _direction?: unknown): WorkspaceLeaf {
++		const activeRoot = this.activeLeaf?.root ?? this.rootSplit;
++		if (newLeaf === "window") {
++			const win = new MockWindow();
++			return this.addLeaf({ win, doc: win.document }, "window");
++		}
++		if (newLeaf === "split") return this.addLeaf(activeRoot, "split");
++		if (newLeaf === true || newLeaf === "tab") return this.addLeaf(activeRoot, "tab");
++
++		if (this.activeLeaf && this.canNavigate(this.activeLeaf)) return this.activeLeaf;
++		const recent = [...this.history]
++			.reverse()
++			.find((l) => l.root === activeRoot && this.canNavigate(l) && this.leaves.includes(l));
++		return recent ?? this.addLeaf(activeRoot, "tab");
++	}
++
++	getMostRecentLeaf(root?: unknown): WorkspaceLeaf | null {
++		const target = root ?? this.rootSplit;
++		const recent = [...this.history].reverse().find((l) => l.root === target && this.leaves.includes(l));
++		return recent ?? this.leaves.find((l) => l.root === target) ?? null;
++	}
++
++	createLeafBySplit(leaf: WorkspaceLeaf, _direction?: unknown): WorkspaceLeaf {
++		return this.addLeaf((leaf as FakeLeaf).root, "split");
++	}
++
++	setActiveLeaf(leaf: WorkspaceLeaf, params?: { focus?: boolean }): void {
++		const fake = leaf as FakeLeaf;
++		this.activeLeaf = fake;
++		this.history.push(fake);
++		if (params?.focus) this.focusedWindow = fake.root.win;
++	}
++
++	revealLeaf(leaf: WorkspaceLeaf): Promise<void> {
++		this.setActiveLeaf(leaf, { focus: true });
++		return Promise.resolve();
++	}
++
++	async openLinkText(linktext: string, _sourcePath: string, newLeaf?: unknown): Promise<void> {
++		const file = this.vault.getAbstractFileByPath(linktext) ?? this.vault.getAbstractFileByPath(`${linktext}.md`);
++		if (!(file instanceof TFile)) return;
++		await this.getLeaf(newLeaf).openFile(file, { active: true });
++	}
++}
++
+ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
+ 	let plugin: MockPlugin;
+ 	let leaf: WorkspaceLeaf;
+@@ -364,7 +532,7 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
  	});
  
  	describe("drag-to-pan with pointer capture", () => {
 -		it("captures pointer, sets is-panning class on popoutDoc.body, and scrolls", () => {
-+		it("captures pointer, sets is-panning class on popoutDoc.body, and scrolls when drag exceeds threshold", () => {
++		it("captures pointer, sets is-panning class on popoutDoc.body, and scrolls once drag exceeds threshold", () => {
  			const view = new DaylioGraphView(leaf, plugin);
  			(view as any).containerEl = containerEl;
  
-@@ -375,7 +375,7 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
- 
- 			(view as any).setupDragPan(scrollEl as unknown as HTMLElement);
- 
--			// 1. Primary button pointerdown
-+			// 1. Primary button pointerdown (does not capture pointer yet to avoid swallowing clicks)
- 			const downEvt = new MockPointerEvent("pointerdown", {
- 				button: MouseButton.Main,
- 				clientX: 200,
-@@ -384,11 +384,10 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
+@@ -384,7 +552,12 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
  			});
  			scrollEl.dispatchEvent(downEvt);
  
--			expect(scrollEl.setPointerCapture).toHaveBeenCalledWith(42);
--			expect(popoutWindow.document.body.classList.contains("daylio-is-panning")).toBe(true);
--			expect(mainWindow.document.body.classList.contains("daylio-is-panning")).toBe(false); // Main window unaffected
+-			// 2. Pointer move: drag right by 50px (scroll left by 50px)
++			// A bare pointerdown must not capture the pointer: capture retargets the
++			// following click to scrollEl, so event labels would never see it.
 +			expect(scrollEl.setPointerCapture).not.toHaveBeenCalled();
 +			expect(popoutWindow.document.body.classList.contains("daylio-is-panning")).toBe(false);
- 
--			// 2. Pointer move: drag right by 50px (scroll left by 50px)
-+			// 2. Pointer move: drag right by 50px (scroll left by 50px) - exceeds 4px threshold
++
++			// 2. Pointer move: drag right by 50px (scroll left by 50px), past the click threshold
  			const moveEvt = new MockPointerEvent("pointermove", {
  				clientX: 250,
  				pointerId: 42,
-@@ -396,6 +395,9 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
- 			});
- 			scrollEl.dispatchEvent(moveEvt);
- 
-+			expect(scrollEl.setPointerCapture).toHaveBeenCalledWith(42);
-+			expect(popoutWindow.document.body.classList.contains("daylio-is-panning")).toBe(true);
-+			expect(mainWindow.document.body.classList.contains("daylio-is-panning")).toBe(false); // Main window unaffected
- 			expect(scrollEl.scrollLeft).toBe(50);
- 
- 			// 3. Pointer up: release capture and remove panning class
-@@ -556,4 +558,163 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
+@@ -555,4 +728,156 @@ describe("DaylioGraphView (Multi-Window & Pop-out Window Support)", () => {
  			expect(mockOpenTabById).toHaveBeenCalledWith("daylio-mood-graph");
  		});
  	});
++	describe("opening notes from the graph (pop-out window routing)", () => {
++		const TARGET = "entries/2024-01-01 Note.md";
++		const EXISTING = "entries/2023-12-31 Existing.md";
 +
-+	describe("openFile (popout window and cross-window navigation)", () => {
-+		it("routes to main window rootSplit when graph is in an isolated popout window without notes", async () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = containerEl; // popoutWindow container
++		type Setup = {
++			graphIn: "main" | "popout";
++			mainHasNote?: boolean;
++			popoutHasNote?: boolean;
++		};
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
++		function makeFile(path: string): TFile {
++			const file = new TFile();
++			file.path = path;
++			file.extension = "md";
++			file.basename = path.split("/").pop()!.replace(/\.md$/, "");
++			return file;
++		}
 +
-+			const mainLeaf = new WorkspaceLeaf();
-+			const openFileSpy = vi.spyOn(mainLeaf, "openFile").mockResolvedValue(undefined);
-+			const setActiveLeafSpy = vi.spyOn(view.app.workspace, "setActiveLeaf");
-+			vi.spyOn(view.app.workspace, "getMostRecentLeaf").mockReturnValue(mainLeaf);
++		function setup({ graphIn, mainHasNote = true, popoutHasNote = false }: Setup) {
++			const app = new App();
++			const files = new Map([TARGET, EXISTING].map((p) => [p, makeFile(p)]));
++			vi.spyOn(app.vault, "getAbstractFileByPath").mockImplementation((p: string) => files.get(p) ?? null);
++			const workspace = new FakeWorkspace(mainWindow, app.vault);
++			app.workspace = workspace;
++			plugin.app = app;
 +
-+			(view as any).openFile("entries/2024-01-01 Note.md");
++			const mainLeaf = workspace.addLeaf(workspace.rootSplit, "initial");
++			if (mainHasNote) void mainLeaf.openFile(files.get(EXISTING)!);
++			workspace.setActiveLeaf(mainLeaf, { focus: true });
 +
-+			expect(view.app.workspace.getMostRecentLeaf).toHaveBeenCalledWith(view.app.workspace.rootSplit);
-+			expect(openFileSpy).toHaveBeenCalledWith(mockTargetFile);
-+			await Promise.resolve();
-+			expect(setActiveLeafSpy).toHaveBeenCalledWith(mainLeaf, { focus: true });
++			const popoutRoot: FakeRoot = { win: popoutWindow, doc: popoutWindow.document };
++			const graphRoot = graphIn === "main" ? workspace.rootSplit : popoutRoot;
++			const graphLeaf = workspace.addLeaf(graphRoot, "initial");
++			const view = new DaylioGraphView(graphLeaf, plugin);
++			(view as any).app = app;
++			(view as any).containerEl =
++				graphIn === "main" ? new MockElement("div", mainWindow.document) : containerEl;
++			graphLeaf.view = view;
++
++			let popoutNoteLeaf: FakeLeaf | null = null;
++			if (popoutHasNote) {
++				popoutNoteLeaf = workspace.addLeaf(popoutRoot, "initial");
++				void popoutNoteLeaf.openFile(files.get(EXISTING)!);
++				workspace.setActiveLeaf(popoutNoteLeaf, { focus: true });
++			}
++
++			// The user clicks inside the graph, which makes its leaf active.
++			workspace.setActiveLeaf(graphLeaf, { focus: true });
++			const leavesBefore = [...workspace.leaves];
++
++			const click = async (mods: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean } = {}) => {
++				(view as any).openFile(TARGET, new MockMouseEvent("click", mods) as unknown as MouseEvent);
++				for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
++			};
++			const leavesShowingTarget = () => workspace.leaves.filter((l) => l.filePath === TARGET);
++
++			return { workspace, view, graphLeaf, mainLeaf, popoutRoot, popoutNoteLeaf, leavesBefore, click, leavesShowingTarget };
++		}
++
++		it("opens the note in the main window when the pop-out window contains only the graph", async () => {
++			const s = setup({ graphIn: "popout" });
++
++			await s.click();
++
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(opened[0]!.root).toBe(s.workspace.rootSplit);
++			expect(s.graphLeaf.view).toBe(s.view); // graph is not replaced
 +		});
 +
-+		it("falls back to getLeaf('tab') in main window when rootSplit has no active leaves", async () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = containerEl;
++		it("focuses the main window after opening the note from a graph-only pop-out", async () => {
++			const s = setup({ graphIn: "popout" });
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
++			await s.click();
 +
-+			const newTabLeaf = new WorkspaceLeaf();
-+			const openFileSpy = vi.spyOn(newTabLeaf, "openFile").mockResolvedValue(undefined);
-+			const setActiveLeafSpy = vi.spyOn(view.app.workspace, "setActiveLeaf");
-+
-+			vi.spyOn(view.app.workspace, "getMostRecentLeaf").mockReturnValue(null);
-+			vi.spyOn(view.app.workspace, "getLeaf").mockReturnValue(newTabLeaf);
-+
-+			(view as any).openFile("entries/2024-01-01 Note.md");
-+
-+			expect(view.app.workspace.getLeaf).toHaveBeenCalledWith("tab");
-+			expect(openFileSpy).toHaveBeenCalledWith(mockTargetFile);
-+			await Promise.resolve();
-+			expect(setActiveLeafSpy).toHaveBeenCalledWith(newTabLeaf, { focus: true });
++			expect(s.workspace.activeLeaf?.filePath).toBe(TARGET);
++			expect(s.workspace.focusedWindow).toBe(mainWindow);
 +		});
 +
-+		it("handles mod === 'tab' (Ctrl/Cmd+Click) from isolated popout window", async () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = containerEl;
++		it("opens the note in the main window even if the main window only has an empty tab", async () => {
++			const s = setup({ graphIn: "popout", mainHasNote: false });
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
++			await s.click();
 +
-+			const tabLeaf = new WorkspaceLeaf();
-+			const openFileSpy = vi.spyOn(tabLeaf, "openFile").mockResolvedValue(undefined);
-+			const setActiveLeafSpy = vi.spyOn(view.app.workspace, "setActiveLeaf");
-+
-+			vi.spyOn(Keymap, "isModEvent").mockReturnValue("tab");
-+			vi.spyOn(view.app.workspace, "getLeaf").mockReturnValue(tabLeaf);
-+
-+			const fakeMouseEvent = new MockPointerEvent("click") as unknown as MouseEvent;
-+			(view as any).openFile("entries/2024-01-01 Note.md", fakeMouseEvent);
-+
-+			expect(view.app.workspace.getLeaf).toHaveBeenCalledWith("tab");
-+			expect(openFileSpy).toHaveBeenCalledWith(mockTargetFile);
-+			await Promise.resolve();
-+			expect(setActiveLeafSpy).toHaveBeenCalledWith(tabLeaf, { focus: true });
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(opened[0]!.root).toBe(s.workspace.rootSplit);
++			expect(s.graphLeaf.view).toBe(s.view);
 +		});
 +
-+		it("handles mod === 'split' (Ctrl/Cmd+Alt+Click) from isolated popout window", async () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = containerEl;
++		it("Ctrl/Cmd+Click from a graph-only pop-out opens the note in a new tab in the pop-out window", async () => {
++			const s = setup({ graphIn: "popout" });
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
++			await s.click({ ctrlKey: true });
 +
-+			const activeMainLeaf = new WorkspaceLeaf();
-+			const splitLeaf = new WorkspaceLeaf();
-+			const openFileSpy = vi.spyOn(splitLeaf, "openFile").mockResolvedValue(undefined);
-+			const setActiveLeafSpy = vi.spyOn(view.app.workspace, "setActiveLeaf");
-+
-+			vi.spyOn(Keymap, "isModEvent").mockReturnValue("split");
-+			vi.spyOn(view.app.workspace, "getMostRecentLeaf").mockReturnValue(activeMainLeaf);
-+			vi.spyOn(view.app.workspace, "createLeafBySplit").mockReturnValue(splitLeaf);
-+
-+			const fakeMouseEvent = new MockPointerEvent("click") as unknown as MouseEvent;
-+			(view as any).openFile("entries/2024-01-01 Note.md", fakeMouseEvent);
-+
-+			expect(view.app.workspace.createLeafBySplit).toHaveBeenCalledWith(activeMainLeaf);
-+			expect(openFileSpy).toHaveBeenCalledWith(mockTargetFile);
-+			await Promise.resolve();
-+			expect(setActiveLeafSpy).toHaveBeenCalledWith(splitLeaf, { focus: true });
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(s.leavesBefore).not.toContain(opened[0]);
++			expect(opened[0]!.origin).toBe("tab");
++			expect(opened[0]!.root).toBe(s.popoutRoot); // same window as the graph
++			expect(s.mainLeaf.filePath).toBe(EXISTING); // existing note left alone
++			expect(s.graphLeaf.view).toBe(s.view);
 +		});
 +
-+		it("handles mod === 'window' (Ctrl/Cmd+Alt+Shift+Click) from isolated popout window", async () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = containerEl;
++		it("Ctrl/Cmd+Alt+Click from a graph-only pop-out opens the note in a new split in the main window", async () => {
++			const s = setup({ graphIn: "popout" });
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
++			await s.click({ ctrlKey: true, altKey: true });
 +
-+			const popoutLeaf = new WorkspaceLeaf();
-+			const openFileSpy = vi.spyOn(popoutLeaf, "openFile").mockResolvedValue(undefined);
-+			const setActiveLeafSpy = vi.spyOn(view.app.workspace, "setActiveLeaf");
-+
-+			vi.spyOn(Keymap, "isModEvent").mockReturnValue("window");
-+			vi.spyOn(view.app.workspace, "getLeaf").mockReturnValue(popoutLeaf);
-+
-+			const fakeMouseEvent = new MockPointerEvent("click") as unknown as MouseEvent;
-+			(view as any).openFile("entries/2024-01-01 Note.md", fakeMouseEvent);
-+
-+			expect(view.app.workspace.getLeaf).toHaveBeenCalledWith("window");
-+			expect(openFileSpy).toHaveBeenCalledWith(mockTargetFile);
-+			await Promise.resolve();
-+			expect(setActiveLeafSpy).toHaveBeenCalledWith(popoutLeaf, { focus: true });
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(s.leavesBefore).not.toContain(opened[0]);
++			expect(opened[0]!.origin).toBe("split");
++			expect(opened[0]!.root).toBe(s.workspace.rootSplit);
++			expect(s.mainLeaf.filePath).toBe(EXISTING);
 +		});
 +
-+		it("delegates to openLinkText when popout window contains another note tab", () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = containerEl; // in popoutWindow
++		it("Ctrl/Cmd+Alt+Shift+Click from a graph-only pop-out opens the note in a new window", async () => {
++			const s = setup({ graphIn: "popout" });
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
-+			const openLinkSpy = vi.spyOn(view.app.workspace, "openLinkText").mockResolvedValue(undefined);
++			await s.click({ ctrlKey: true, altKey: true, shiftKey: true });
 +
-+			// Add a markdown note leaf in the popout window
-+			const noteLeaf = new WorkspaceLeaf();
-+			noteLeaf.view = {
-+				getViewType: () => "markdown",
-+				containerEl: new MockElement("div", popoutWindow.document) as unknown as HTMLElement,
-+			} as any;
-+			vi.spyOn(view.app.workspace, "iterateAllLeaves").mockImplementation((cb) => {
-+				cb(leaf);
-+				cb(noteLeaf);
-+			});
-+
-+			(view as any).openFile("entries/2024-01-01 Note.md");
-+
-+			expect(openLinkSpy).toHaveBeenCalledWith("entries/2024-01-01 Note.md", "", false);
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(opened[0]!.origin).toBe("window");
++			expect(opened[0]!.root).not.toBe(s.workspace.rootSplit);
++			expect(opened[0]!.root).not.toBe(s.popoutRoot);
 +		});
 +
-+		it("delegates to openLinkText when graph view is in the main window", () => {
-+			const view = new DaylioGraphView(leaf, plugin);
-+			(view as any).containerEl = new MockElement("div", mainWindow.document) as unknown as HTMLElement; // mainWindow document
++		it("opens the note in the pop-out window when that window also has a note open", async () => {
++			const s = setup({ graphIn: "popout", popoutHasNote: true });
 +
-+			const mockTargetFile = new TFile();
-+			mockTargetFile.path = "entries/2024-01-01 Note.md";
-+			vi.spyOn(view.app.vault, "getAbstractFileByPath").mockReturnValue(mockTargetFile);
-+			const openLinkSpy = vi.spyOn(view.app.workspace, "openLinkText").mockResolvedValue(undefined);
++			await s.click();
 +
-+			(view as any).openFile("entries/2024-01-01 Note.md");
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(opened[0]!.root).toBe(s.popoutRoot);
++			expect(s.mainLeaf.filePath).toBe(EXISTING);
++			expect(s.graphLeaf.view).toBe(s.view);
++		});
 +
-+			expect(openLinkSpy).toHaveBeenCalledWith("entries/2024-01-01 Note.md", "", false);
++		it("opens the note in the main window when the graph itself is in the main window", async () => {
++			const s = setup({ graphIn: "main" });
++
++			await s.click();
++
++			const opened = s.leavesShowingTarget();
++			expect(opened).toHaveLength(1);
++			expect(opened[0]!.root).toBe(s.workspace.rootSplit);
++			expect(s.graphLeaf.view).toBe(s.view);
 +		});
 +	});
  });

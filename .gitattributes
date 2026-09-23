@@ -1,0 +1,2 @@
+# Keep patch files byte-exact (gold.patch touches CRLF files upstream)
+*.patch -text

@@ -7,6 +7,7 @@ Quickly inspect the model's git diff (model_patch) from the latest (or specified
 Usage:
     python scripts/latest_diff.py
     python scripts/latest_diff.py --log logs/<file>.eval
+    python scripts/latest_diff.py --ignore-whitespace   # hide indentation churn (newer logs only)
 """
 
 import argparse
@@ -27,6 +28,12 @@ def main():
     parser = argparse.ArgumentParser(description="View model git diff from latest eval log.")
     parser.add_argument("--log", "-l", type=str, default=None, help="Path to specific .eval file.")
     parser.add_argument("--logs-dir", type=str, default="./logs", help="Path to logs directory.")
+    parser.add_argument(
+        "--ignore-whitespace",
+        "-w",
+        action="store_true",
+        help="Show the whitespace-insensitive diff (model_patch_ignore_whitespace), if the log has one.",
+    )
     args = parser.parse_args()
 
     if args.log:
@@ -48,8 +55,14 @@ def main():
         found = False
         if sample.scores:
             for scorer_name, score in sample.scores.items():
-                if score.metadata and "model_patch" in score.metadata:
-                    patch = score.metadata["model_patch"]
+                key = "model_patch"
+                if args.ignore_whitespace:
+                    if score.metadata and "model_patch_ignore_whitespace" in score.metadata:
+                        key = "model_patch_ignore_whitespace"
+                    else:
+                        print("  (No whitespace-insensitive diff in this log; showing the full diff)")
+                if score.metadata and key in score.metadata:
+                    patch = score.metadata[key]
                     if patch.strip():
                         print(patch)
                     else:

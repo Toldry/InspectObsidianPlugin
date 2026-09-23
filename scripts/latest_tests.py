@@ -55,7 +55,8 @@ def main():
             continue
 
         for scorer_name, score in sample.scores.items():
-            print(f"  Scorer: {scorer_name} | Result: {score.value}")
+            reason_str = f" (reason: {score.reason})" if getattr(score, "reason", None) else ""
+            print(f"  Scorer: {scorer_name} | Result: {score.value}{reason_str}")
             print("-" * 80)
             explanation = score.explanation or "(No explanation)"
             # Clean ANSI escape sequences if any legacy ones are stored in the log

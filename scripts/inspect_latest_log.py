@@ -66,8 +66,8 @@ def print_summary(log, log_path: Path):
     print("=" * 80)
     print(f"EVAL LOG SUMMARY: {log_path.name}")
     print("=" * 80)
-    print(f"File Path   : {log_path.resolve()}")
-    print(f"Status      : {log.status}")
+    status_display = "error (failed)" if log.status == "error" else log.status
+    print(f"Status      : {status_display}")
     if hasattr(log, "eval"):
         eval_spec = log.eval
         print(f"Task        : {eval_spec.task}")
@@ -119,7 +119,8 @@ def print_summary(log, log_path: Path):
         if sample.scores:
             print("Scores      :")
             for scorer_name, score in sample.scores.items():
-                print(f"  [{scorer_name}] = {score.value}")
+                reason_str = f" (reason: {score.reason})" if getattr(score, "reason", None) else ""
+                print(f"  [{scorer_name}] = {score.value}{reason_str}")
                 if score.metadata and "model_patch" in score.metadata:
                     patch = score.metadata["model_patch"]
                     patch_lines = len(patch.splitlines()) if patch else 0

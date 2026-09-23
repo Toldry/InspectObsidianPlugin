@@ -1,0 +1,5 @@
+# Only env.patch is needed in the image build. Keep the hidden tests, the
+# reference fix and the local staging repo out of the build context.
+*
+!Dockerfile
+!env.patch
