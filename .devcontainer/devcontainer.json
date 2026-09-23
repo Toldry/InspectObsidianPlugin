@@ -1,28 +1,83 @@
+// Dev container for running AI agents on this repo without risk to the host.
+// Format is JSONC (JSON with comments). See AGENTS.md Section 6 for the reasoning behind these choices.
 {
     "name": "${localWorkspaceFolderBasename} Safe Sandbox",
-    "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
-    "remoteUser": "vscode",
-    "containerEnv": {
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "safe.directory",
-        "GIT_CONFIG_VALUE_0": "${containerWorkspaceFolder}"
+
+    // Build from .devcontainer/Dockerfile (pinned ubuntu-24.04 base + root-only setup).
+    // Root steps live there because sudo is disabled at runtime (see runArgs).
+    "build": {
+        "dockerfile": "Dockerfile"
     },
-    "customizations": {
-        "vscode": {
-            "settings": {
-                "terminal.integrated.defaultProfile.linux": "bash",
-                "files.eol": "\n"
-            },
-            "extensions": []
+
+    // Non-root user that VS Code, terminals and agents run as.
+    "remoteUser": "vscode",
+
+    // Dev container features: prebuilt install scripts applied on top of the image.
+    // Exact resolved versions are pinned in devcontainer-lock.json (auto-generated, don't hand-edit).
+    // Deliberately NO docker-in-docker / docker-outside-of-docker: both would let the container escape to the host.
+    "features": {
+        "ghcr.io/devcontainers/features/python:1": {
+            "version": "3.12"
+        },
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "20"
         }
     },
+
+    // Runs once after the container is created, as remoteUser. Must not need root.
+    "postCreateCommand": "pip install --user inspect_ai",
+
+    // Environment variables set on the container itself.
+    "containerEnv": {
+        // Mark the workspace as a safe git directory (its owner differs from the container user).
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "${containerWorkspaceFolder}",
+        // Keep all Claude Code state (incl. .claude.json) inside the persistent volume mounted below.
+        "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
+    },
+
+    "customizations": {
+        "vscode": {
+            // Applied as remote settings, so they take effect only in container windows.
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "files.eol": "\n",
+
+                // Visual indicator: this window is inside the dev container.
+                "window.title": "🔒 DEV CONTAINER — ${rootName}${separator}${activeEditorShort}",
+                "workbench.colorCustomizations": {
+                    "titleBar.activeBackground": "#7a1fa2",
+                    "titleBar.activeForeground": "#ffffff",
+                    "titleBar.inactiveBackground": "#4a1363",
+                    "titleBar.inactiveForeground": "#dddddd",
+                    "statusBar.background": "#7a1fa2",
+                    "statusBar.foreground": "#ffffff",
+                    "statusBarItem.remoteBackground": "#ff9800",
+                    "statusBarItem.remoteForeground": "#000000",
+                    "activityBar.activeBorder": "#ff9800"
+                }
+            },
+            // Installed into the container on every (re)build. The extension bundles Claude Code itself.
+            "extensions": ["anthropic.claude-code"]
+        }
+    },
+
+    // Extra `docker run` arguments.
     "runArgs": [
+        // Blocks privilege escalation via setuid binaries (so sudo won't work) — hardening for agents.
         "--security-opt=no-new-privileges:true",
+        // Fixed, readable container name.
         "--name=dev_container_${localWorkspaceFolderBasename}",
+        // Secrets (e.g. model API keys) read from the host at container start; never stored in the repo.
         "--env-file",
         "${localEnv:USERPROFILE}/.secrets/InspectObsidianPlugin.env"
     ],
+
     "mounts": [
-        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind"
+        // Host git identity. HOME + USERPROFILE: whichever is set (Linux/macOS vs Windows) forms the path.
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind",
+        // Named volume so Claude Code history and login survive rebuilds. Isolated from the host's ~/.claude.
+        "source=claude-code-config-${devcontainerId},target=/home/vscode/.claude,type=volume"
     ]
 }

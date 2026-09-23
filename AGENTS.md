@@ -35,6 +35,11 @@ This repository includes official offline reference documentation for Inspect AI
 
 ```
 InspectObsidianPlugin/
+├── .devcontainer/          # Dev container for AI agents (no Docker access; see Section 6)
+│   ├── devcontainer.json
+│   ├── devcontainer-lock.json # Pinned feature versions/digests (commit it)
+│   ├── Dockerfile            # Root-only setup (sudo is disabled at runtime)
+│   └── managed-settings.json # Claude Code starts in auto mode inside the container only
 ├── swe_daylio_popout.py    # Main Inspect task definition & custom test scorer
 ├── test.patch              # Hidden reference unit tests applied post-agent run
 ├── Dockerfile              # Sandbox container definition (shallow-fetched base commit, npm deps)
@@ -74,7 +79,10 @@ InspectObsidianPlugin/
 ## 4. Key Workflows & CLI Commands
 
 ### Running Evaluations
-To run an evaluation task:
+
+> **Agent Instruction**: Agents must **never** run `inspect eval`, `inspect score`, or `docker compose build` themselves. The user runs these on the host machine. The dev container has no Docker access (see [Section 6](#6-dev-container-devcontainer)), so these commands would fail there anyway. When you need an evaluation run, **ask the user to run it**: give the exact command, and say what you'll check in the resulting log. Once the user confirms it finished, read the new log with the tools under [Viewing and Analyzing Logs](#viewing-and-analyzing-logs).
+
+To run an evaluation task (user, on the host):
 ```bash
 # Run a single sample test
 inspect eval swe_daylio_popout.py --model google/gemini-3.6-flash --limit 1
@@ -166,8 +174,8 @@ Inspect provides visual tools, CLI commands, and dedicated workspace scripts in 
      print("Explanation:", log.samples[0].scores["npm_test_scorer"].explanation)
      ```
 
-6. **Re-Scoring Existing Logs (`inspect score`)**:
-   Re-run a scorer over an existing eval log without re-executing the model:
+6. **Re-Scoring Existing Logs (`inspect score`)** — *host only, ask the user*:
+   Re-run a scorer over an existing eval log without re-executing the model (the scorer runs tests in a Docker sandbox, so this needs Docker):
    ```bash
    inspect score logs/<log-file>.eval --scorer swe_daylio_popout.py@npm_test_scorer
    ```
@@ -186,3 +194,36 @@ Inspect provides visual tools, CLI commands, and dedicated workspace scripts in 
 - **Prevent Git History Leakage**: Ensure sandbox environments never contain commits, tags, or branches created after `base_commit`. Use shallow commit fetches (`git fetch --depth 1 origin <base_commit>`).
 - **Deterministic Sandboxes**: Keep sandbox images self-contained. All dependencies must be baked in during image build (`Dockerfile`) since network access is disabled during eval runs.
 - **Inspect Framework Idioms**: Always adhere to Inspect AI conventions outlined in [`llms-guide.txt`](llms-guide.txt) when introducing new tasks, scorers, or solver configurations.
+- **Evaluations Are Run by the User**: Never run `inspect eval`, `inspect score`, or any Docker command. Ask the user to run it on the host, giving the exact command (see [Running Evaluations](#running-evaluations)).
+
+---
+
+## 6. Dev Container (`.devcontainer/`)
+
+The dev container exists so AI agents can work in this repo **without putting the host machine at risk**. Every decision below serves that goal. Don't weaken any of them without the user's explicit approval.
+
+### Key Decisions
+
+- **No Docker inside the dev container.** Neither way of giving a container Docker access keeps it isolated:
+  - *Docker-outside-of-Docker* shares the host's Docker socket. Anything that can reach the socket can start a privileged container that mounts the host filesystem, which is root on the host.
+  - *Docker-in-Docker* runs a separate daemon inside the container. That needs `--privileged`, and escaping a privileged container is a well-known technique. On Docker Desktop for Windows, the host VM also mounts the Windows drives, so an escape reaches Windows files.
+  - **Consequence:** evaluations and Docker builds run on the host, by the user only (see [Running Evaluations](#running-evaluations)).
+  - If agents ever need Docker, the options that stay isolated are Docker Sandboxes (microVM-based) or Docker-in-Docker with Docker Desktop's Enhanced Container Isolation. Plain DinD and DooD don't qualify.
+- **`--security-opt=no-new-privileges:true` is set, so `sudo` does not work** in the running container (it fails with `effective uid is not 0`). Put root-level setup (`apt` packages, directory ownership) in [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile). Runtime installs in `postCreateCommand` must not need root, for example `pip install --user`.
+- **The base image is pinned to `ubuntu-24.04`.** The floating `ubuntu` tag moved to 26.04 ("resolute") and broke the build without any repo change. Pinning keeps builds reproducible. Bump the pin on purpose, never by switching back to a floating tag.
+- **Claude Code history and login persist across rebuilds.** The config lives in the named volume `claude-code-config-${devcontainerId}`, mounted at `/home/vscode/.claude`. `CLAUDE_CONFIG_DIR` points to the same path, so `.claude.json` also lands in the volume. This follows [Anthropic's dev container guidance](https://code.claude.com/docs/en/devcontainer). The volume is kept separate from the host's `~/.claude` on purpose, so host credentials and other projects' history stay out of the sandbox.
+- **Claude Code starts in auto mode inside the container and in Manual mode on the host.**
+  - Inside the container, the Dockerfile copies [`.devcontainer/managed-settings.json`](.devcontainer/managed-settings.json) (`permissions.defaultMode: "auto"`) to `/etc/claude-code/managed-settings.json`, where only the container sees it.
+  - On the host, the user's own `~/.claude/settings.json` sets `defaultMode: "default"`.
+  - Don't put `defaultMode` in the project's `.claude/settings.json`: the workspace is shared by both environments, and Claude Code ignores `auto` there anyway.
+- **The Claude Code VS Code extension** (`anthropic.claude-code`) is installed automatically through `customizations.vscode.extensions`. It includes its own copy of Claude Code, so installing the Claude Code CLI separately isn't needed.
+
+### What Survives a Rebuild
+
+| Survives | Lost |
+|---|---|
+| The workspace (bind-mounted from the host) | Packages installed by hand (`apt`, `pip`, `npm -g`) |
+| The `.gitconfig` bind mount and the `--env-file` secrets | Changes under `/home/vscode`, except `~/.claude` |
+| The Claude Code config volume (`~/.claude`) | Files outside the workspace (`/tmp`, `/opt`, …) |
+
+Anything the environment needs permanently belongs in `.devcontainer/Dockerfile` (root-level) or `postCreateCommand` (user-level), never in manual installs.
