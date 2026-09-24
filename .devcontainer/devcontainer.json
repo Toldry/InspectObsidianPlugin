@@ -12,20 +12,9 @@
     // Non-root user that VS Code, terminals and agents run as.
     "remoteUser": "vscode",
 
-    // Dev container features: prebuilt install scripts applied on top of the image.
-    // Exact resolved versions are pinned in devcontainer-lock.json (auto-generated, don't hand-edit).
+    // No dev container features and no postCreateCommand: Python, Node, gh and inspect_ai
+    // are installed in the Dockerfile so they are cached as ordinary image layers.
     // Deliberately NO docker-in-docker / docker-outside-of-docker: both would let the container escape to the host.
-    "features": {
-        "ghcr.io/devcontainers/features/python:1": {
-            "version": "3.12"
-        },
-        "ghcr.io/devcontainers/features/node:1": {
-            "version": "20"
-        }
-    },
-
-    // Runs once after the container is created, as remoteUser. Must not need root.
-    "postCreateCommand": "pip install --user inspect_ai",
 
     // Environment variables set on the container itself.
     "containerEnv": {

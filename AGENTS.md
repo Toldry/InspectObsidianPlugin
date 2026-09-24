@@ -37,8 +37,7 @@ This repository includes official offline reference documentation for Inspect AI
 InspectObsidianPlugin/
 ├── .devcontainer/          # Dev container for AI agents (no Docker access; see Section 6)
 │   ├── devcontainer.json
-│   ├── devcontainer-lock.json # Pinned feature versions/digests (commit it)
-│   ├── Dockerfile            # Root-only setup (sudo is disabled at runtime)
+│   ├── Dockerfile            # All setup: apt Python/Node/gh, inspect_ai venv (sudo is disabled at runtime)
 │   └── managed-settings.json # Claude Code starts in auto mode inside the container only
 ├── src/
 │   ├── swe_daylio_popout.py  # Main Inspect task definition & custom test scorer
@@ -220,7 +219,8 @@ The dev container exists so AI agents can work in this repo **without putting th
   - *Docker-in-Docker* runs a separate daemon inside the container. That needs `--privileged`, and escaping a privileged container is a well-known technique. On Docker Desktop for Windows, the host VM also mounts the Windows drives, so an escape reaches Windows files.
   - **Consequence:** evaluations and Docker builds run on the host, by the user only (see [Running Evaluations](#running-evaluations)).
   - If agents ever need Docker, the options that stay isolated are Docker Sandboxes (microVM-based) or Docker-in-Docker with Docker Desktop's Enhanced Container Isolation. Plain DinD and DooD don't qualify.
-- **`--security-opt=no-new-privileges:true` is set, so `sudo` does not work** in the running container (it fails with `effective uid is not 0`). Put root-level setup (`apt` packages, directory ownership) in [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile). Runtime installs in `postCreateCommand` must not need root, for example `pip install --user`.
+- **`--security-opt=no-new-privileges:true` is set, so `sudo` does not work** in the running container (it fails with `effective uid is not 0`). Put root-level setup (`apt` packages, directory ownership) in [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile). Runtime installs must not need root. Python tooling lives in `/opt/venv` (owned by `vscode`, first on `PATH`), so `pip install` works without root.
+- **No dev container features and no `postCreateCommand`.** Python, Node, `gh` and `inspect_ai` are installed in the Dockerfile, ordered from least to most frequently changed, so each is a cached Docker layer. Features always run after the Dockerfile and re-run together whenever the feature list changes; the `python` feature alone took ~3 minutes. Add new tools as Dockerfile steps, not features.
 - **The base image is pinned to `ubuntu-24.04`.** The floating `ubuntu` tag moved to 26.04 ("resolute") and broke the build without any repo change. Pinning keeps builds reproducible. Bump the pin on purpose, never by switching back to a floating tag.
 - **Claude Code history and login persist across rebuilds.** The config lives in the named volume `claude-code-config-${devcontainerId}`, mounted at `/home/vscode/.claude`. `CLAUDE_CONFIG_DIR` points to the same path, so `.claude.json` also lands in the volume. This follows [Anthropic's dev container guidance](https://code.claude.com/docs/en/devcontainer). The volume is kept separate from the host's `~/.claude` on purpose, so host credentials and other projects' history stay out of the sandbox.
 - **Claude Code starts in auto mode inside the container and in Manual mode on the host.**
@@ -237,4 +237,4 @@ The dev container exists so AI agents can work in this repo **without putting th
 | The `.gitconfig` bind mount and the `--env-file` secrets | Changes under `/home/vscode`, except `~/.claude` |
 | The Claude Code config volume (`~/.claude`) | Files outside the workspace (`/tmp`, `/opt`, …) |
 
-Anything the environment needs permanently belongs in `.devcontainer/Dockerfile` (root-level) or `postCreateCommand` (user-level), never in manual installs.
+Anything the environment needs permanently belongs in `.devcontainer/Dockerfile`, never in manual installs.
