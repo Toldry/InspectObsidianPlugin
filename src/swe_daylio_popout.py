@@ -3,7 +3,7 @@ import re
 import sys
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react
+from inspect_ai.agent import as_solver, react
 from inspect_ai.dataset import Sample
 from inspect_ai.scorer import (
     CORRECT,
@@ -159,10 +159,12 @@ def swe_daylio_popout(message_limit: int = 200, attempts: int = 1) -> Task:
     return Task(
         dataset=dataset,
         solver=safe_agent_solver(
-            react(
-                prompt=AGENT_PROMPT,
-                tools=[bash(), text_editor()],
-                attempts=attempts,
+            as_solver(
+                react(
+                    prompt=AGENT_PROMPT,
+                    tools=[bash(), text_editor()],
+                    attempts=attempts,
+                )
             )
         ),
         scorer=npm_test_scorer(),
