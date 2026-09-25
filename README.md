@@ -34,3 +34,5 @@ docker compose build
 inspect eval src/swe_daylio_popout.py --model google/gemini-3.6-flash
 ```
 *(You can replace the model string with your preferred supported model).*
+
+**Results:** see [RESULTS.md](RESULTS.md) for a summary of the runs so far, how the scorer works, and how to explore the committed logs in [`results/logs/`](results/logs/).
